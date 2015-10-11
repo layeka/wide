@@ -1,20 +1,23 @@
-FROM golang:latest
+FROM golang:cross
 MAINTAINER Liang Ding <dl88250@gmail.com>
 
-RUN go get github.com/88250/ide_stub
-RUN go get github.com/nsf/gocode
-RUN go get github.com/bradfitz/goimports
+ADD . /wide/gogogo/src/github.com/b3log/wide
 
-ADD . /go/src/github.com/b3log/wide
-WORKDIR /go/src/github.com/b3log/wide
-RUN go get
-RUN go build
+RUN tar zxf /wide/gogogo/src/github.com/b3log/wide/deps/golang.org.tar.gz -C /wide/gogogo/src/
+RUN tar zxf /wide/gogogo/src/github.com/b3log/wide/deps/github.com.tar.gz -C /wide/gogogo/src/
 
-RUN cp -r . /root/wide
-WORKDIR /root/wide
-RUN rm -rf /go/pkg /go/src/*
-RUN mv ./hello /go/src/hello
+RUN useradd wide && useradd runner
 
 ENV GOROOT /usr/src/go
+ENV GOPATH /wide/gogogo
+
+RUN go build github.com/go-fsnotify/fsnotify 
+RUN go build github.com/gorilla/sessions 
+RUN go build github.com/gorilla/websocket
+
+RUN go install github.com/visualfc/gotools github.com/nsf/gocode github.com/bradfitz/goimports
+
+WORKDIR /wide/gogogo/src/github.com/b3log/wide
+RUN go build -v
 
 EXPOSE 7070

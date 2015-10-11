@@ -1,18 +1,18 @@
-// Copyright (c) 2014, B3log
-//  
+// Copyright (c) 2014-2015, b3log.org
+//
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
-//  
+//
 //     http://www.apache.org/licenses/LICENSE-2.0
-//  
+//
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Editor manipulations.
+// Package editor includes editor related manipulations.
 package editor
 
 import (
@@ -29,39 +29,43 @@ import (
 
 	"github.com/b3log/wide/conf"
 	"github.com/b3log/wide/file"
+	"github.com/b3log/wide/log"
 	"github.com/b3log/wide/session"
 	"github.com/b3log/wide/util"
-	"github.com/golang/glog"
 	"github.com/gorilla/websocket"
 )
 
+// Logger.
+var logger = log.NewLogger(os.Stdout)
+
 // WSHandler handles request of creating editor channel.
+// XXX: NOT used at present
 func WSHandler(w http.ResponseWriter, r *http.Request) {
 	httpSession, _ := session.HTTPSession.Get(r, "wide-session")
+	if httpSession.IsNew {
+		http.Error(w, "Forbidden", http.StatusForbidden)
+
+		return
+	}
+
 	sid := httpSession.Values["id"].(string)
 
 	conn, _ := websocket.Upgrade(w, r, nil, 1024, 1024)
 	editorChan := util.WSChannel{Sid: sid, Conn: conn, Request: r, Time: time.Now()}
 
+	ret := map[string]interface{}{"output": "Editor initialized", "cmd": "init-editor"}
+	err := editorChan.WriteJSON(&ret)
+	if nil != err {
+		return
+	}
+
 	session.EditorWS[sid] = &editorChan
 
-	ret := map[string]interface{}{"output": "Editor initialized", "cmd": "init-editor"}
-	editorChan.Conn.WriteJSON(&ret)
-
-	glog.Infof("Open a new [Editor] with session [%s], %d", sid, len(session.EditorWS))
+	logger.Tracef("Open a new [Editor] with session [%s], %d", sid, len(session.EditorWS))
 
 	args := map[string]interface{}{}
 	for {
-		if err := session.EditorWS[sid].Conn.ReadJSON(&args); err != nil {
-			if err.Error() == "EOF" {
-				return
-			}
-
-			if err.Error() == "unexpected EOF" {
-				return
-			}
-
-			glog.Error("Editor WS ERROR: " + err.Error())
+		if err := session.EditorWS[sid].ReadJSON(&args); err != nil {
 			return
 		}
 
@@ -71,9 +75,9 @@ func WSHandler(w http.ResponseWriter, r *http.Request) {
 
 		offset := getCursorOffset(code, line, ch)
 
-		// glog.Infof("offset: %d", offset)
+		logger.Tracef("offset: %d", offset)
 
-		gocode := conf.Wide.GetExecutableInGOBIN("gocode")
+		gocode := util.Go.GetExecutableInGOBIN("gocode")
 		argv := []string{"-f=json", "autocomplete", strconv.Itoa(offset)}
 
 		var output bytes.Buffer
@@ -89,8 +93,8 @@ func WSHandler(w http.ResponseWriter, r *http.Request) {
 
 		ret = map[string]interface{}{"output": string(output.Bytes()), "cmd": "autocomplete"}
 
-		if err := session.EditorWS[sid].Conn.WriteJSON(&ret); err != nil {
-			glog.Error("Editor WS ERROR: " + err.Error())
+		if err := session.EditorWS[sid].WriteJSON(&ret); err != nil {
+			logger.Error("Editor WS ERROR: " + err.Error())
 			return
 		}
 	}
@@ -101,13 +105,18 @@ func AutocompleteHandler(w http.ResponseWriter, r *http.Request) {
 	var args map[string]interface{}
 
 	if err := json.NewDecoder(r.Body).Decode(&args); err != nil {
-		glog.Error(err)
+		logger.Error(err)
 		http.Error(w, err.Error(), 500)
 
 		return
 	}
 
 	session, _ := session.HTTPSession.Get(r, "wide-session")
+	if session.IsNew {
+		http.Error(w, "Forbidden", http.StatusForbidden)
+
+		return
+	}
 	username := session.Values["username"].(string)
 
 	path := args["path"].(string)
@@ -115,7 +124,7 @@ func AutocompleteHandler(w http.ResponseWriter, r *http.Request) {
 	fout, err := os.Create(path)
 
 	if nil != err {
-		glog.Error(err)
+		logger.Error(err)
 		http.Error(w, err.Error(), 500)
 
 		return
@@ -125,7 +134,7 @@ func AutocompleteHandler(w http.ResponseWriter, r *http.Request) {
 	fout.WriteString(code)
 
 	if err := fout.Close(); nil != err {
-		glog.Error(err)
+		logger.Error(err)
 		http.Error(w, err.Error(), 500)
 
 		return
@@ -136,9 +145,9 @@ func AutocompleteHandler(w http.ResponseWriter, r *http.Request) {
 
 	offset := getCursorOffset(code, line, ch)
 
-	// glog.Infof("offset: %d", offset)
+	logger.Tracef("offset: %d", offset)
 
-	userWorkspace := conf.Wide.GetUserWorkspace(username)
+	userWorkspace := conf.GetUserWorkspace(username)
 	workspaces := filepath.SplitList(userWorkspace)
 	libPath := ""
 	for _, workspace := range workspaces {
@@ -147,23 +156,18 @@ func AutocompleteHandler(w http.ResponseWriter, r *http.Request) {
 		libPath += userLib + conf.PathListSeparator
 	}
 
-	glog.V(5).Infof("gocode set lib-path %s", libPath)
+	logger.Tracef("gocode set lib-path [%s]", libPath)
 
 	// FIXME: using gocode set lib-path has some issues while accrossing workspaces
-	gocode := conf.Wide.GetExecutableInGOBIN("gocode")
-	argv := []string{"set", "lib-path", libPath}
-	exec.Command(gocode, argv...).Run()
+	gocode := util.Go.GetExecutableInGOBIN("gocode")
+	exec.Command(gocode, []string{"set", "lib-path", libPath}...).Run()
 
-	argv = []string{"-f=json", "autocomplete", strconv.Itoa(offset)}
+	argv := []string{"-f=json", "--in=" + path, "autocomplete", strconv.Itoa(offset)}
 	cmd := exec.Command(gocode, argv...)
-
-	stdin, _ := cmd.StdinPipe()
-	stdin.Write([]byte(code))
-	stdin.Close()
 
 	output, err := cmd.CombinedOutput()
 	if nil != err {
-		glog.Error(err)
+		logger.Error(err)
 		http.Error(w, err.Error(), 500)
 
 		return
@@ -183,20 +187,20 @@ func GetExprInfoHandler(w http.ResponseWriter, r *http.Request) {
 
 	var args map[string]interface{}
 	if err := json.NewDecoder(r.Body).Decode(&args); err != nil {
-		glog.Error(err)
+		logger.Error(err)
 		http.Error(w, err.Error(), 500)
 
 		return
 	}
 
 	path := args["path"].(string)
-	curDir := path[:strings.LastIndex(path, conf.PathSeparator)]
-	filename := path[strings.LastIndex(path, conf.PathSeparator)+1:]
+	curDir := filepath.Dir(path)
+	filename := filepath.Base(path)
 
 	fout, err := os.Create(path)
 
 	if nil != err {
-		glog.Error(err)
+		logger.Error(err)
 		data["succ"] = false
 
 		return
@@ -206,7 +210,7 @@ func GetExprInfoHandler(w http.ResponseWriter, r *http.Request) {
 	fout.WriteString(code)
 
 	if err := fout.Close(); nil != err {
-		glog.Error(err)
+		logger.Error(err)
 		data["succ"] = false
 
 		return
@@ -217,18 +221,18 @@ func GetExprInfoHandler(w http.ResponseWriter, r *http.Request) {
 
 	offset := getCursorOffset(code, line, ch)
 
-	// glog.Infof("offset [%d]", offset)
+	logger.Tracef("offset [%d]", offset)
 
-	ide_stub := conf.Wide.GetExecutableInGOBIN("ide_stub")
-	argv := []string{"type", "-cursor", filename + ":" + strconv.Itoa(offset), "-info", "."}
-	cmd := exec.Command(ide_stub, argv...)
+	ideStub := util.Go.GetExecutableInGOBIN("gotools")
+	argv := []string{"types", "-pos", filename + ":" + strconv.Itoa(offset), "-info", "."}
+	cmd := exec.Command(ideStub, argv...)
 	cmd.Dir = curDir
 
 	setCmdEnv(cmd, username)
 
 	output, err := cmd.CombinedOutput()
 	if nil != err {
-		glog.Error(err)
+		logger.Error(err)
 		http.Error(w, err.Error(), 500)
 
 		return
@@ -250,24 +254,29 @@ func FindDeclarationHandler(w http.ResponseWriter, r *http.Request) {
 	defer util.RetJSON(w, r, data)
 
 	session, _ := session.HTTPSession.Get(r, "wide-session")
+	if session.IsNew {
+		http.Error(w, "Forbidden", http.StatusForbidden)
+
+		return
+	}
 	username := session.Values["username"].(string)
 
 	var args map[string]interface{}
 	if err := json.NewDecoder(r.Body).Decode(&args); err != nil {
-		glog.Error(err)
+		logger.Error(err)
 		http.Error(w, err.Error(), 500)
 
 		return
 	}
 
 	path := args["path"].(string)
-	curDir := path[:strings.LastIndex(path, conf.PathSeparator)]
-	filename := path[strings.LastIndex(path, conf.PathSeparator)+1:]
+	curDir := filepath.Dir(path)
+	filename := filepath.Base(path)
 
 	fout, err := os.Create(path)
 
 	if nil != err {
-		glog.Error(err)
+		logger.Error(err)
 		data["succ"] = false
 
 		return
@@ -277,7 +286,7 @@ func FindDeclarationHandler(w http.ResponseWriter, r *http.Request) {
 	fout.WriteString(code)
 
 	if err := fout.Close(); nil != err {
-		glog.Error(err)
+		logger.Error(err)
 		data["succ"] = false
 
 		return
@@ -288,18 +297,18 @@ func FindDeclarationHandler(w http.ResponseWriter, r *http.Request) {
 
 	offset := getCursorOffset(code, line, ch)
 
-	// glog.Infof("offset [%d]", offset)
+	logger.Tracef("offset [%d]", offset)
 
-	ide_stub := conf.Wide.GetExecutableInGOBIN("ide_stub")
-	argv := []string{"type", "-cursor", filename + ":" + strconv.Itoa(offset), "-def", "."}
-	cmd := exec.Command(ide_stub, argv...)
+	ideStub := util.Go.GetExecutableInGOBIN("gotools")
+	argv := []string{"types", "-pos", filename + ":" + strconv.Itoa(offset), "-def", "."}
+	cmd := exec.Command(ideStub, argv...)
 	cmd.Dir = curDir
 
 	setCmdEnv(cmd, username)
 
 	output, err := cmd.CombinedOutput()
 	if nil != err {
-		glog.Error(err)
+		logger.Error(err)
 		http.Error(w, err.Error(), 500)
 
 		return
@@ -315,10 +324,11 @@ func FindDeclarationHandler(w http.ResponseWriter, r *http.Request) {
 	part := found[:strings.LastIndex(found, ":")]
 	cursorSep := strings.LastIndex(part, ":")
 	path = found[:cursorSep]
+
 	cursorLine, _ := strconv.Atoi(found[cursorSep+1 : strings.LastIndex(found, ":")])
 	cursorCh, _ := strconv.Atoi(found[strings.LastIndex(found, ":")+1:])
 
-	data["path"] = path
+	data["path"] = filepath.ToSlash(path)
 	data["cursorLine"] = cursorLine
 	data["cursorCh"] = cursorCh
 }
@@ -329,25 +339,30 @@ func FindUsagesHandler(w http.ResponseWriter, r *http.Request) {
 	defer util.RetJSON(w, r, data)
 
 	session, _ := session.HTTPSession.Get(r, "wide-session")
+	if session.IsNew {
+		http.Error(w, "Forbidden", http.StatusForbidden)
+
+		return
+	}
 	username := session.Values["username"].(string)
 
 	var args map[string]interface{}
 
 	if err := json.NewDecoder(r.Body).Decode(&args); err != nil {
-		glog.Error(err)
+		logger.Error(err)
 		http.Error(w, err.Error(), 500)
 
 		return
 	}
 
 	filePath := args["path"].(string)
-	curDir := filePath[:strings.LastIndex(filePath, conf.PathSeparator)]
-	filename := filePath[strings.LastIndex(filePath, conf.PathSeparator)+1:]
+	curDir := filepath.Dir(filePath)
+	filename := filepath.Base(filePath)
 
 	fout, err := os.Create(filePath)
 
 	if nil != err {
-		glog.Error(err)
+		logger.Error(err)
 		data["succ"] = false
 
 		return
@@ -357,7 +372,7 @@ func FindUsagesHandler(w http.ResponseWriter, r *http.Request) {
 	fout.WriteString(code)
 
 	if err := fout.Close(); nil != err {
-		glog.Error(err)
+		logger.Error(err)
 		data["succ"] = false
 
 		return
@@ -367,18 +382,18 @@ func FindUsagesHandler(w http.ResponseWriter, r *http.Request) {
 	ch := int(args["cursorCh"].(float64))
 
 	offset := getCursorOffset(code, line, ch)
-	// glog.Infof("offset [%d]", offset)
+	logger.Tracef("offset [%d]", offset)
 
-	ide_stub := conf.Wide.GetExecutableInGOBIN("ide_stub")
-	argv := []string{"type", "-cursor", filename + ":" + strconv.Itoa(offset), "-use", "."}
-	cmd := exec.Command(ide_stub, argv...)
+	ideStub := util.Go.GetExecutableInGOBIN("gotools")
+	argv := []string{"types", "-pos", filename + ":" + strconv.Itoa(offset), "-use", "."}
+	cmd := exec.Command(ideStub, argv...)
 	cmd.Dir = curDir
 
 	setCmdEnv(cmd, username)
 
 	output, err := cmd.CombinedOutput()
 	if nil != err {
-		glog.Error(err)
+		logger.Error(err)
 		http.Error(w, err.Error(), 500)
 
 		return
@@ -398,7 +413,7 @@ func FindUsagesHandler(w http.ResponseWriter, r *http.Request) {
 
 		part := found[:strings.LastIndex(found, ":")]
 		cursorSep := strings.LastIndex(part, ":")
-		path := found[:cursorSep]
+		path := filepath.ToSlash(found[:cursorSep])
 		cursorLine, _ := strconv.Atoi(found[cursorSep+1 : strings.LastIndex(found, ":")])
 		cursorCh, _ := strconv.Atoi(found[strings.LastIndex(found, ":")+1:])
 
@@ -436,7 +451,7 @@ func getCursorOffset(code string, line, ch int) (offset int) {
 }
 
 func setCmdEnv(cmd *exec.Cmd, username string) {
-	userWorkspace := conf.Wide.GetUserWorkspace(username)
+	userWorkspace := conf.GetUserWorkspace(username)
 
 	cmd.Env = append(cmd.Env,
 		"GOPATH="+userWorkspace,

@@ -1,10 +1,17 @@
-# Wide [![Build Status](https://drone.io/github.com/b3log/wide/status.png)](https://drone.io/github.com/b3log/wide/latest)
+# Wide [![Build Status](https://img.shields.io/travis/b3log/wide.svg?style=flat)](https://travis-ci.org/b3log/wide) [![Coverage Status](https://img.shields.io/coveralls/b3log/wide.svg?style=flat)](https://coveralls.io/r/b3log/wide) [![Apache License](http://img.shields.io/badge/license-apache2-orange.svg?style=flat)](http://www.apache.org/licenses/LICENSE-2.0) [![API Documentation](http://img.shields.io/badge/godoc-reference-blue.svg?style=flat)](http://godoc.org/github.com/b3log/wide) [![Download](http://img.shields.io/badge/download-~2.7K-red.svg?style=flat)](http://pan.baidu.com/s/1dD3XwOT)
 
-## Intro
+_Have a [try](http://wide.b3log.org/signup) first, then [download](http://pan.baidu.com/s/1dD3XwOT) and setup it on your local area network, enjoy yourself!_
 
-A <b>W</b>eb-based <b>IDE</b> for Teams using Golang.
+先试试我们搭建好的[在线服务](http://wide.b3log.org/signup)，你可以在这里[下载](http://pan.baidu.com/s/1dD3XwOT)并在本地环境运行，然后邀请小伙伴们来玩吧！
 
-<img src="https://cloud.githubusercontent.com/assets/873584/4606377/d0ca3c2a-521b-11e4-912c-d955ab05850b.png" width="100%" />
+> * 关于 Wide 的产品定位，请看[这里](http://hacpai.com/article/1438407961481)，并欢迎参与讨论~
+> * 加入[**黑客派**](http://hacpai.com/register)，与其他程序员、设计师共同成长！
+
+## Introduction
+
+A <b>W</b>eb-based <b>IDE</b> for Teams using Go programming language/Golang.
+
+![Hello, 世界](https://cloud.githubusercontent.com/assets/873584/4606377/d0ca3c2a-521b-11e4-912c-d955ab05850b.png)
 
 ## Motivation
 
@@ -29,16 +36,47 @@ A <b>W</b>eb-based <b>IDE</b> for Teams using Golang.
 
 ## Features
 
-* Code Highlight, Folding: Go/HTML/JavaScript/Markdown etc.
-* Autocomplete: Go/HTML etc.
-* Format: Go/HTML/JSON etc.
-* Run & Debug: run/debug multiple processes at the same time
-* Multiplayer: a real team development experience
-* Navigation, Jump to declaration, Find usages, File search etc.
-* Shell: run command on the server
-* Git integration: git command on the web
-* Web development: Frontend devlopment (HTML/JS/CSS) all in one
-* Go tool: go get/install/fmt etc.
+* [X] Code Highlight, Folding: Go/HTML/JavaScript/Markdown etc.
+* [X] Autocomplete: Go/HTML etc.
+* [X] Format: Go/HTML/JSON etc.
+* [X] Build & Run
+* [X] Multiplayer: a real team development experience
+* [X] Navigation, Jump to declaration, Find usages, File search etc.
+* [X] Shell: run command on the server
+* [X] Web development: HTML/JS/CSS editor with [Emmet](http://emmet.io) integrated
+* [X] Go tool: go get/install/fmt etc.
+* [X] File Import & Export
+* [X] Themes: editor and UI adjust, respectively
+* [X] Cross-Compilation
+* [ ] Debug
+* [ ] Git integration: git command on the web
+
+## Screenshots
+
+* **Overview**
+  
+  ![Overview](https://cloud.githubusercontent.com/assets/873584/5450620/1d51831e-8543-11e4-930b-670871902425.png)
+* **Goto File**
+  
+  ![Goto File](https://cloud.githubusercontent.com/assets/873584/5450616/1d495da6-8543-11e4-9285-f9d9c60779ac.png)
+* **Autocomplete**
+  
+  ![Autocomplete](https://cloud.githubusercontent.com/assets/873584/5450619/1d4d5712-8543-11e4-8fe4-35dbc8348a6e.png)
+* **Theme**
+  
+  ![4](https://cloud.githubusercontent.com/assets/873584/5450617/1d4c0826-8543-11e4-8b86-f79a4e41550a.png)
+* **Show Expression Info**
+  
+  ![Show Expression Info](https://cloud.githubusercontent.com/assets/873584/5450618/1d4cd9f4-8543-11e4-950f-121bd3ff4a39.png)
+* **Build Error Info**
+  
+  ![Build Error Info](https://cloud.githubusercontent.com/assets/873584/5450632/3e51cccc-8543-11e4-8ca8-8d2427aa16b8.png)
+* **Git Clone**
+
+  ![Git Clone](https://cloud.githubusercontent.com/assets/873584/6545235/2284f230-c5b7-11e4-985e-7e04367921b1.png)
+* **Cross-Compilation**
+  
+  ![Cross-Compilation](https://cloud.githubusercontent.com/assets/873584/10130037/226d75fc-65f7-11e5-94e4-25ee579ca175.png)
 
 ## Architecture 
 
@@ -64,29 +102,19 @@ Flow:
 ![Code Assist](https://cloud.githubusercontent.com/assets/873584/4399135/3b80c21c-4463-11e4-8e94-7f7e8d12a4df.png)
 
  * Autocompletion
- * Find Usages
+ * Find Usages/Jump To Declaration/etc.
 
 Flow: 
  1. Browser sends code assist request
  2. Handler gets user workspace of the request with HTTP session
- 3. Server executes ````gocode````/````ide_stub````<br/>
+ 3. Server executes ````gocode````/````ide_stub(gotools)````<br/>
     3.1 Sets environment variables (e.g. ${GOPATH})<br/>
     3.2 ````gocode```` with ````lib-path```` parameter
 
 ## Documents
 
-* [用户指南](http://88250.gitbooks.io/wide-user-guide)
-* [开发指南](http://88250.gitbooks.io/wide-dev-guide)
-
-## Demos
-
-* 20141024-1.0.0, png ![](http://b3log.org/wide/demo/20141024.png)
-
-### Olds
-* [20140927, png](http://b3log.org/wide/demo/20140927.png)
-* [20140913, png](http://b3log.org/wide/demo/20140913.png)
-* [20140910, png](http://b3log.org/wide/demo/20140910.png)
-* [20140823, swf](http://b3log.org/wide/demo/20140823.html)
+* [用户指南](https://www.gitbook.com/book/88250/wide-user-guide)
+* [开发指南](https://www.gitbook.com/book/88250/wide-dev-guide)
 
 ## Setup
 
@@ -102,29 +130,33 @@ Download [HERE](http://pan.baidu.com/s/1dD3XwOT)!
 
 ### Build Wide for yourself
 
-1. [Download](https://github.com/b3log/wide/archive/master.zip) source or by `git clone`
+1. [Download](https://github.com/b3log/wide/archive/master.zip) source or by `git clone https://github.com/b3log/wide`
 2. Get dependencies with 
-   * `go get -u`
-   * `go get -u github.com/88250/ide_stub`
-   * `go get -u github.com/nsf/gocode`
+   * `go get`
+   * `go get github.com/visualfc/gotools github.com/nsf/gocode github.com/bradfitz/goimports`
 3. Compile wide with `go build` 
 
 ### Docker
 
 1. Get image: `sudo docker pull 88250/wide:latest`
-2. Run: `sudo docker run -p {port}:7070 -e channel=ws://{ip}:{port} 88250/wide:latest /root/wide/wide -docker=true`
+2. Run: `sudo docker run -p 127.0.0.1:7070:7070 88250/wide:latest ./wide -docker=true -channel=ws://127.0.0.1:7070`
+3. Open browser: http://127.0.0.1:7070
 
 ## Known Issues
 
 * [Shell is not available on Windows](https://github.com/b3log/wide/issues/32)
+* [Rename directory](https://github.com/b3log/wide/issues/251)
 
-## License
+## Terms
 
-Copyright (c) 2014, B3log Team (http://b3log.org)
-
-Licensed under the [Apache License 2.0](https://github.com/b3log/wide/blob/master/LICENSE).
+* This software is open sourced under the Apache License 2.0
+* You can not get rid of the "Powered by [B3log](http://b3log.org)" from any page, even which you made
+* If you want to use this software for commercial purpose, please mail to support@liuyun.io for a commercial license request
+* Copyright &copy; b3log.org, all rights reserved
 
 ## Credits
+
+Wide is made possible by the following open source projects.
 
 * [golang](http://golang.org)
 * [CodeMirror](https://github.com/marijnh/CodeMirror)
@@ -132,10 +164,8 @@ Licensed under the [Apache License 2.0](https://github.com/b3log/wide/blob/maste
 * [LiteIDE](https://github.com/visualfc/liteide)
 * [gocode](https://github.com/nsf/gocode)
 * [Gorilla](https://github.com/gorilla)
-* [GoBuild](http://gobuild.io)
 * [Docker](https://docker.com)
 
 ----
 
 <img src="https://cloud.githubusercontent.com/assets/873584/4606328/4e848b96-5219-11e4-8db1-fa12774b57b4.png" width="256px" />
-</center>

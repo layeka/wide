@@ -1,12 +1,12 @@
-/* 
- * Copyright (c) 2014, B3log
- *  
+/*
+ * Copyright (c) 2014-2015, b3log.org
+ *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
- *  
+ *
  *     http://www.apache.org/licenses/LICENSE-2.0
- *  
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -17,7 +17,59 @@
 var wide = {
     curNode: undefined,
     curEditor: undefined,
-    curProcessId: undefined, // 当前正在运行的进程 id（pid）
+    curProcessId: undefined, // curent running process id (pid)
+    refreshOutline: function () {
+        if (!wide.curEditor ||
+                (wide.curEditor && wide.curEditor.doc.getMode().name !== "go")) {
+            $("#outline").html('');
+            return false;
+        }
+
+        var request = newWideRequest();
+        request.code = wide.curEditor.getValue();
+
+        $.ajax({
+            type: 'POST',
+            async: false,
+            url: config.context + '/outline',
+            data: JSON.stringify(request),
+            dataType: "json",
+            success: function (data) {
+                if (!data.succ) {
+                    return;
+                }
+
+                var outlineHTML = '<ul class="list">',
+                        decls = ['constDecls', 'varDecls', 'funcDecls',
+                            'structDecls', 'interfaceDecls', 'typeDecls'];
+
+                for (var i = 0, max = decls.length; i < max; i++) {
+                    var key = decls[i];
+                    for (var j = 0, maxj = data[key].length; j < maxj; j++) {
+                        var obj = data[key][j];
+                        outlineHTML += '<li data-ch="' + obj.Ch + '" data-line="'
+                                + obj.Line + '"><span class="ico ico-'
+                                + key.replace('Decls', '') + '"></span> ' + obj.Name + '</li>';
+                    }
+                }
+                $("#outline").html(outlineHTML + '</ul>');
+
+                $("#outline li").dblclick(function () {
+                    var $it = $(this),
+                            cursor = CodeMirror.Pos($it.data('line'), $it.data("ch"));
+
+                    var editor = wide.curEditor;
+                    editor.setCursor(cursor);
+
+                    var half = Math.floor(editor.getScrollInfo().clientHeight / editor.defaultTextHeight() / 2);
+                    var cursorCoords = editor.cursorCoords({line: cursor.line - half, ch: 0}, "local");
+                    editor.scrollTo(0, cursorCoords.top);
+
+                    editor.focus();
+                });
+            }
+        });
+    },
     _initDialog: function () {
         $(".dialog-prompt > input").keyup(function (event) {
             var $okBtn = $(this).closest(".dialog-main").find(".dialog-footer > button:eq(0)");
@@ -32,11 +84,10 @@ var wide = {
             }
         });
 
-
         $("#dialogAlert").dialog({
             "modal": true,
-            "height": 26,
-            "width": 260,
+            "height": 40,
+            "width": 350,
             "title": config.label.tip,
             "hiddenOk": true,
             "cancelText": config.label.confirm,
@@ -47,7 +98,7 @@ var wide = {
 
         $("#dialogRemoveConfirm").dialog({
             "modal": true,
-            "height": 26,
+            "height": 36,
             "width": 260,
             "title": config.label.delete,
             "okText": config.label.delete,
@@ -61,7 +112,7 @@ var wide = {
 
                 $.ajax({
                     type: 'POST',
-                    url: '/file/remove',
+                    url: config.context + '/file/remove',
                     data: JSON.stringify(request),
                     dataType: "json",
                     success: function (data) {
@@ -74,84 +125,6 @@ var wide = {
                         }
 
                         $("#dialogRemoveConfirm").dialog("close");
-                        tree.fileTree.removeNode(wide.curNode);
-
-                        if (!tree.isDir()) {
-                            // 是文件的话，查看 editor 中是否被打开，如打开则移除
-                            for (var i = 0, ii = editors.data.length; i < ii; i++) {
-                                if (editors.data[i].id === wide.curNode.tId) {
-                                    $(".edit-panel .tabs > div[data-index=" + wide.curNode.tId + "]").find(".ico-close").click();
-                                    break;
-                                }
-                            }
-                        } else {
-                            for (var i = 0, ii = editors.data.length; i < ii; i++) {
-                                if (tree.isParents(editors.data[i].id, wide.curNode.tId)) {
-                                    $(".edit-panel .tabs > div[data-index=" + editors.data[i].id + "]").find(".ico-close").click();
-                                    i--;
-                                    ii--;
-                                }
-                            }
-                        }
-                    }
-                });
-            }
-        });
-
-        $("#dialogRenamePrompt").dialog({
-            "modal": true,
-            "height": 52,
-            "width": 260,
-            "title": config.label.rename,
-            "okText": config.label.rename,
-            "cancelText": config.label.cancel,
-            "afterOpen": function () {
-                var index = wide.curNode.name.lastIndexOf("."),
-                        name = wide.curNode.name.substring(0, index);
-                if (index === -1) {
-                    name = wide.curNode.name;
-                }
-                $("#dialogRenamePrompt").closest(".dialog-main").find(".dialog-footer > button:eq(0)").prop("disabled", true);
-                $("#dialogRenamePrompt > input").val(name).select().focus();
-            },
-            "ok": function () {
-                var name = $("#dialogRenamePrompt > input").val(),
-                        request = newWideRequest();
-
-                request.oldPath = wide.curNode.path;
-
-                var pathIndex = wide.curNode.path.lastIndexOf(config.pathSeparator),
-                        nameIndex = wide.curNode.name.lastIndexOf("."),
-                        ext = wide.curNode.name.substring(nameIndex, wide.curNode.name.length);
-                request.newPath = wide.curNode.path.substring(0, pathIndex) + config.pathSeparator
-                        + name + ext;
-
-                $.ajax({
-                    type: 'POST',
-                    url: '/file/rename',
-                    data: JSON.stringify(request),
-                    dataType: "json",
-                    success: function (data) {
-                        if (!data.succ) {
-                            $("#dialogRenamePrompt").dialog("close");
-                            bottomGroup.tabs.setCurrent("notification");
-                            windows.flowBottom();
-                            $(".bottom-window-group .notification").focus();
-                            return false;
-                        }
-
-                        $("#dialogRenamePrompt").dialog("close");
-
-                        // update tree node
-                        wide.curNode.name = name + ext;
-                        wide.curNode.title = request.newPath;
-                        wide.curNode.path = request.newPath;
-                        tree.fileTree.updateNode(wide.curNode);
-
-                        // update open editor tab name
-                        var $currentSpan = $(".edit-panel .tabs > div[data-index=" + wide.curNode.tId + "] > span:eq(0)");
-                        $currentSpan.attr("title", request.newPath);
-                        $currentSpan.html($currentSpan.find("span").html() + wide.curNode.name);
                     }
                 });
             }
@@ -172,12 +145,12 @@ var wide = {
                 var request = newWideRequest(),
                         name = $("#dialogNewFilePrompt > input").val();
 
-                request.path = wide.curNode.path + config.pathSeparator + name;
+                request.path = wide.curNode.path + "/" + name;
                 request.fileType = "f";
 
                 $.ajax({
                     type: 'POST',
-                    url: '/file/new',
+                    url: config.context + '/file/new',
                     data: JSON.stringify(request),
                     dataType: "json",
                     success: function (data) {
@@ -188,18 +161,8 @@ var wide = {
                             $(".bottom-window-group .notification").focus();
                             return false;
                         }
-
+                        
                         $("#dialogNewFilePrompt").dialog("close");
-                        var iconSkin = wide.getClassBySuffix(name.split(".")[1]);
-
-                        tree.fileTree.addNodes(wide.curNode, [{
-                                "name": name,
-                                "iconSkin": iconSkin,
-                                "path": request.path,
-                                "mode": data.mode,
-                                "removable": true,
-                                "creatable": true
-                            }]);
                     }
                 });
             }
@@ -220,12 +183,12 @@ var wide = {
                 var name = $("#dialogNewDirPrompt > input").val(),
                         request = newWideRequest();
 
-                request.path = wide.curNode.path + config.pathSeparator + name;
+                request.path = wide.curNode.path + "/" + name;
                 request.fileType = "d";
 
                 $.ajax({
                     type: 'POST',
-                    url: '/file/new',
+                    url: config.context + '/file/new',
                     data: JSON.stringify(request),
                     dataType: "json",
                     success: function (data) {
@@ -238,14 +201,6 @@ var wide = {
                         }
 
                         $("#dialogNewDirPrompt").dialog("close");
-
-                        tree.fileTree.addNodes(wide.curNode, [{
-                                "name": name,
-                                "iconSkin": "ico-ztree-dir ",
-                                "path": request.path,
-                                "removable": true,
-                                "creatable": true
-                            }]);
                     }
                 });
             }
@@ -253,7 +208,7 @@ var wide = {
 
         $("#dialogGoFilePrompt").dialog({
             "modal": true,
-            "height": 300,
+            "height": 320,
             "width": 660,
             "title": config.label.goto_file,
             "okText": config.label.go,
@@ -264,10 +219,11 @@ var wide = {
                     tree.openFile(tree.fileTree.getNodeByTId(tId));
                     tree.fileTree.selectNode(wide.curNode);
                     $("#dialogGoFilePrompt").dialog("close");
+                    wide.curEditor.focus();
                 });
 
                 $("#dialogGoFilePrompt").on("click", "li", function () {
-                    var $list = $("#dialogGoFilePrompt > .list")
+                    var $list = $("#dialogGoFilePrompt > .list");
                     $list.find("li").removeClass("selected");
                     $list.data("index", $(this).data("index"));
                     $(this).addClass("selected");
@@ -278,6 +234,7 @@ var wide = {
                     tree.openFile(tree.fileTree.getNodeByTId(tId));
                     tree.fileTree.selectNode(wide.curNode);
                     $("#dialogGoFilePrompt").dialog("close");
+                    wide.curEditor.focus();
                 });
 
                 $("#dialogGoFilePrompt > input").bind("input", function () {
@@ -292,7 +249,7 @@ var wide = {
 
                     $.ajax({
                         type: 'POST',
-                        url: '/file/find/name',
+                        url: config.context + '/file/find/name',
                         data: JSON.stringify(request),
                         dataType: "json",
                         success: function (data) {
@@ -303,7 +260,7 @@ var wide = {
                             var goFileHTML = '';
                             for (var i = 0, max = data.founds.length; i < max; i++) {
                                 var path = data.founds[i].path,
-                                        name = path.substr(path.lastIndexOf(config.pathSeparator) + 1),
+                                        name = path.substr(path.lastIndexOf("/") + 1),
                                         icoSkin = wide.getClassBySuffix(name.split(".")[1]);
                                 if (i === 0) {
                                     goFileHTML += '<li data-index="' + i + '" class="selected" title="'
@@ -334,6 +291,7 @@ var wide = {
                 tree.openFile(tree.fileTree.getNodeByTId(tId));
                 tree.fileTree.selectNode(wide.curNode);
                 $("#dialogGoFilePrompt").dialog("close");
+                wide.curEditor.focus();
             }
         });
 
@@ -364,18 +322,61 @@ var wide = {
                 editor.focus();
             }
         });
+
+        $("#dialogGitClonePrompt").dialog({
+            "modal": true,
+            "height": 52,
+            "width": 360,
+            "title": config.label.git_clone,
+            "okText": config.label.confirm,
+            "cancelText": config.label.cancel,
+            "afterOpen": function () {
+                $("#dialogGitClonePrompt > input").val('').focus();
+                $("#dialogGitClonePrompt").closest(".dialog-main").find(".dialog-footer > button:eq(0)").prop("disabled", true);
+            },
+            "ok": function () {
+                $("#dialogGitClonePrompt").dialog("close");
+
+                var request = newWideRequest();
+                request.path = wide.curNode.path;
+                request.repository = $("#dialogGitClonePrompt > input").val();
+
+                $.ajax({
+                    type: 'POST',
+                    url: config.context + '/git/clone',
+                    data: JSON.stringify(request),
+                    dataType: "json",
+                    success: function (data) {
+
+                    }
+                });
+            }
+        });
     },
     _initLayout: function () {
-        var mainH = $(window).height() - $(".menu").height() - $(".footer").height(),
+        var mainH = $(window).height() - $(".menu").height() - $(".footer").height() - 2,
                 bottomH = Math.floor(mainH * 0.3);
         // 减小初始化界面抖动
         $(".content").height(mainH).css("position", "relative");
         $(".side .tabs-panel").height(mainH - 20);
 
-        $(".bottom-window-group > .tabs-panel > div > div").height(bottomH - 20);
+        var $bottomGroup = $(".bottom-window-group");
+        if ($bottomGroup.hasClass("bottom-window-group-max")) {
+            $(".bottom-window-group > .tabs-panel > div > div").height(mainH - $bottomGroup.children(".tabs").height());
+        } else {
+            $(".bottom-window-group > .tabs-panel > div > div").height(bottomH - $bottomGroup.children(".tabs").height());
+        }
+
+        if ($(".side-right").hasClass("side-right-max")) {
+            $(".side-right > .tabs-panel > div").height(mainH - $bottomGroup.children(".tabs").height());
+        } else {
+            $(".side-right > .tabs-panel > div").height($('.side-right').height() - $bottomGroup.children(".tabs").height());
+        }
+
+        $("#startPage").height($('.side-right').height() - $bottomGroup.children(".tabs").height() - 100);
     },
     _initWS: function () {
-        var outputWS = new ReconnectingWebSocket(config.channel.output + '/output/ws?sid=' + config.wideSessionId);
+        var outputWS = new ReconnectingWebSocket(config.channel + '/output/ws?sid=' + config.wideSessionId);
         outputWS.onopen = function () {
             console.log('[output onopen] connected');
         };
@@ -394,56 +395,103 @@ var wide = {
 
                 $.ajax({
                     type: 'POST',
-                    url: '/run',
+                    url: config.context + '/run',
                     data: JSON.stringify(request),
                     dataType: "json"
                 });
             }
 
             switch (data.cmd) {
-                case 'run': // 正在运行
-                    bottomGroup.fillOutput($('.bottom-window-group .output > div').html() + data.output);
+                case 'run':
+                    var content = $('.bottom-window-group .output > div').html();
+                    if (!wide.curProcessId || '' === content) {
+                        bottomGroup.fillOutput(content + '<pre>' + data.output + '</pre>');
+                    } else {
+                        bottomGroup.fillOutput(content.replace(/<\/pre>$/g, data.output + '</pre>'));
+                    }
+
                     wide.curProcessId = data.pid;
 
                     break;
-                case 'run-done': // 运行结束  
+                case 'run-done':
+                    bottomGroup.fillOutput($('.bottom-window-group .output > div').html().replace(/<\/pre>$/g, data.output + '</pre>'));
+
                     wide.curProcessId = undefined;
-                    // 运行结束后修改 [构建&运行] 图标状态为可用状态
-                    $(".toolbars .ico-stop").removeClass("ico-stop")
+                    $("#buildRun").removeClass("ico-stop")
                             .addClass("ico-buildrun").attr("title", config.label.build_n_run);
 
                     break;
                 case 'start-build':
                 case 'start-test':
+                case 'start-vet':
                 case 'start-install':
                 case 'start-get':
+                case 'start-git_clone':
                     bottomGroup.fillOutput(data.output);
 
                     break;
                 case 'go test':
+                case 'go vet':
                 case 'go install':
                 case 'go get':
                     bottomGroup.fillOutput($('.bottom-window-group .output > div').html() + data.output);
 
                     break;
+                case 'git clone':
+                    bottomGroup.fillOutput($('.bottom-window-group .output > div').html() + data.output);
+                    tree.fileTree.reAsyncChildNodes(wide.curNode, "refresh", false);
+
+                    break;
                 case 'build':
+                case 'cross-build':
                     bottomGroup.fillOutput($('.bottom-window-group .output > div').html() + data.output);
 
-                    if (data.lints) { // 说明编译有错误输出            
+                    if (data.lints) { // has build error
+                        var files = {};
+
                         for (var i = 0; i < data.lints.length; i++) {
                             var lint = data.lints[i];
 
                             goLintFound.push({from: CodeMirror.Pos(lint.lineNo, 0),
                                 to: CodeMirror.Pos(lint.lineNo, 0),
                                 message: lint.msg, severity: lint.severity});
+
+                            files[lint.file] = lint.file;
                         }
 
-                        $(".toolbars .ico-stop").removeClass("ico-stop")
+                        $("#buildRun").removeClass("ico-stop")
                                 .addClass("ico-buildrun").attr("title", config.label.build_n_run);
-                    }
 
-                    // 触发一次 gutter lint
-                    CodeMirror.signal(wide.curEditor, "change", wide.curEditor);
+                        // trigger gutter lint
+                        for (var path in files) {
+                            var editor = editors.getEditorByPath(path);
+                            CodeMirror.signal(editor, "change", editor);
+                        }
+                    } else {
+                        if ('cross-build' === data.cmd) {
+                            var request = newWideRequest(),
+                                    isSucc = false;
+                            request.path = data.executable;
+                            request.name = data.name;
+
+                            $.ajax({
+                                async: false,
+                                type: 'POST',
+                                url: config.context + '/file/zip/new',
+                                data: JSON.stringify(request),
+                                dataType: "json",
+                                success: function (data) {
+                                    if (!data.succ) {
+                                        $("#dialogAlert").dialog("open", data.msg);
+
+                                        return false;
+                                    }
+
+                                    window.open(config.context + '/file/zip?path=' + data.path + ".zip");
+                                }
+                            });
+                        }
+                    }
 
                     break;
             }
@@ -452,7 +500,7 @@ var wide = {
             console.log('[output onclose] disconnected (' + e.code + ')');
         };
         outputWS.onerror = function (e) {
-            console.log('[output onerror] ' + e);
+            console.log('[output onerror]');
         };
     },
     _initFooter: function () {
@@ -466,18 +514,16 @@ var wide = {
         this._initWS();
 
         // 点击隐藏弹出层
-        $("body").bind("mousedown", function (event) {
-            if (!(event.target.id === "dirRMenu" || $(event.target).closest("#dirRMenu").length > 0)) {
-                $("#dirRMenu").hide();
+        $("body").bind("mouseup", function (event) {
+            // MAC 右键文件树失效
+            if (event.which === 3) {
+                return false;
             }
 
-            if (!(event.target.id === "fileRMenu" || $(event.target).closest("#fileRMenu").length > 0)) {
-                $("#fileRMenu").hide();
-            }
+            $(".frame").hide();
 
-            if (!($(event.target).closest(".frame").length > 0 || event.target.className === "frame")) {
-                $(".frame").hide();
-                $(".menu > ul > li > a, .menu > ul> li > span").unbind("mouseover").removeClass("selected");
+            if (!($(event.target).closest(".frame").length === 1 || event.target.className === "frame")) {
+                $(".menu > ul > li").unbind().removeClass("selected");
                 menu.subMenu();
             }
         });
@@ -505,7 +551,6 @@ var wide = {
             for (var i = 0, ii = editorDatas.length; i < ii; i++) {
                 editorDatas[i].editor.setSize("100%", height);
             }
-
         });
     },
     _save: function (path, editor) {
@@ -519,12 +564,11 @@ var wide = {
 
         $.ajax({
             type: 'POST',
-            url: '/file/save',
+            url: config.context + '/file/save',
             data: JSON.stringify(request),
             dataType: "json",
             success: function (data) {
                 // reset the save state
-
                 editor.doc.markClean();
                 $(".edit-panel .tabs > div").each(function () {
                     var $span = $(this).find("span:eq(0)");
@@ -549,13 +593,33 @@ var wide = {
         if ("text/x-go" === editor.getOption("mode")) {
             wide.gofmt(path, wide.curEditor); // go fmt will save
 
+            // build the file at once
+            var request = newWideRequest();
+            request.file = path;
+            request.code = editor.getValue();
+            request.nextCmd = ""; // build only, no following operation
+            $.ajax({
+                type: 'POST',
+                url: config.context + '/build',
+                data: JSON.stringify(request),
+                dataType: "json",
+                beforeSend: function (data) {
+                    bottomGroup.resetOutput();
+                },
+                success: function (data) {
+                }
+            });
+
+            // refresh outline
+            wide.refreshOutline();
+
             return;
         }
 
         wide._save(path, wide.curEditor);
     },
     stop: function () {
-        if ($(".toolbars .ico-buildrun").length === 1) {
+        if ($("#buildRun").hasClass("ico-buildrun")) {
             menu.run();
             return false;
         }
@@ -569,11 +633,11 @@ var wide = {
 
         $.ajax({
             type: 'POST',
-            url: '/stop',
+            url: config.context + '/stop',
             data: JSON.stringify(request),
             dataType: "json",
             success: function (data) {
-                $(".toolbars .ico-stop").removeClass("ico-stop")
+                $("#buildRun").removeClass("ico-stop")
                         .addClass("ico-buildrun").attr("title", config.label.build_n_run);
             }
         });
@@ -591,7 +655,7 @@ var wide = {
         $.ajax({
             async: false, // sync
             type: 'POST',
-            url: '/go/fmt',
+            url: config.context + '/go/fmt',
             data: JSON.stringify(request),
             dataType: "json",
             success: function (data) {
@@ -624,7 +688,7 @@ var wide = {
                 $.ajax({
                     async: false, // sync
                     type: 'POST',
-                    url: '/go/fmt',
+                    url: config.context + '/go/fmt',
                     data: JSON.stringify(request),
                     dataType: "json",
                     success: function (data) {
@@ -660,7 +724,8 @@ var wide = {
     getClassBySuffix: function (suffix) {
         var iconSkin = "ico-ztree-other ";
         switch (suffix) {
-            case "html", "htm":
+            case "html":
+            case "htm":
                 iconSkin = "ico-ztree-html ";
                 break;
             case "go":
@@ -687,7 +752,13 @@ var wide = {
             case "xml":
                 iconSkin = "ico-ztree-xml ";
                 break;
-            case "jpg", "jpeg", "bmp", "gif", "png", "svg", "ico":
+            case "jpg":
+            case "jpeg":
+            case "bmp":
+            case "gif":
+            case "png":
+            case "svg":
+            case "ico":
                 iconSkin = "ico-ztree-img ";
                 break;
         }
@@ -701,8 +772,8 @@ $(document).ready(function () {
     tree.init();
     menu.init();
     hotkeys.init();
-    notification.init();
     session.init();
+    notification.init();
     editors.init();
     windows.init();
     bottomGroup.init();

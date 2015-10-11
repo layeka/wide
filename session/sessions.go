@@ -1,18 +1,18 @@
-// Copyright (c) 2014, B3log
-//  
+// Copyright (c) 2014-2015, b3log.org
+//
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
-//  
+//
 //     http://www.apache.org/licenses/LICENSE-2.0
-//  
+//
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Session manipulations.
+// Package session includes session related manipulations.
 //
 // Wide server side needs maintain two kinds of sessions:
 //
@@ -23,90 +23,200 @@
 package session
 
 import (
+	"bytes"
 	"encoding/json"
+	"math/rand"
 	"net/http"
 	"os"
+	"path/filepath"
+	"sort"
+	"strconv"
 	"sync"
 	"time"
 
 	"github.com/b3log/wide/conf"
 	"github.com/b3log/wide/event"
+	"github.com/b3log/wide/log"
 	"github.com/b3log/wide/util"
-	"github.com/golang/glog"
+	"github.com/go-fsnotify/fsnotify"
 	"github.com/gorilla/sessions"
 	"github.com/gorilla/websocket"
 )
 
 const (
-	SessionStateActive = iota // session state: active
-	SessionStateClosed        // session state: closed (not used so far)
+	sessionStateActive = iota
+	sessionStateClosed // (not used so far)
 )
 
+// Logger.
+var logger = log.NewLogger(os.Stdout)
+
 var (
-	// Session channels. <sid, *util.WSChannel>
+	// SessionWS holds all session channels. <sid, *util.WSChannel>
 	SessionWS = map[string]*util.WSChannel{}
 
-	// Editor channels. <sid, *util.WSChannel>
+	// EditorWS holds all editor channels. <sid, *util.WSChannel>
 	EditorWS = map[string]*util.WSChannel{}
 
-	// Output channels. <sid, *util.WSChannel>
+	// OutputWS holds all output channels. <sid, *util.WSChannel>
 	OutputWS = map[string]*util.WSChannel{}
 
-	// Notification channels. <sid, *util.WSChannel>
+	// NotificationWS holds all notification channels. <sid, *util.WSChannel>
 	NotificationWS = map[string]*util.WSChannel{}
+
+	// PlaygroundWS holds all playground channels. <sid, *util.WSChannel>
+	PlaygroundWS = map[string]*util.WSChannel{}
 )
 
 // HTTP session store.
 var HTTPSession = sessions.NewCookieStore([]byte("BEYOND"))
 
-// Wide session, associated with a browser tab.
+// WideSession represents a session associated with a browser tab.
 type WideSession struct {
-	Id          string                     // id
+	ID          string                     // id
 	Username    string                     // username
 	HTTPSession *sessions.Session          // HTTP session related
 	Processes   []*os.Process              // process set
 	EventQueue  *event.UserEventQueue      // event queue
 	State       int                        // state
 	Content     *conf.LatestSessionContent // the latest session content
+	FileWatcher *fsnotify.Watcher          // files change watcher
 	Created     time.Time                  // create time
 	Updated     time.Time                  // the latest use time
 }
 
 // Type of wide sessions.
-type Sessions []*WideSession
+type wSessions []*WideSession
 
 // Wide sessions.
-var WideSessions Sessions
+var WideSessions wSessions
 
 // Exclusive lock.
 var mutex sync.Mutex
 
+// FixedTimeRelease releases invalid sessions.
+//
 // In some special cases (such as a browser uninterrupted refresh / refresh in the source code view) will occur
 // some invalid sessions, the function checks and removes these invalid sessions periodically (1 hour).
 //
 // Invalid sessions: sessions that not used within 30 minutes, refers to WideSession.Updated field.
 func FixedTimeRelease() {
 	go func() {
+		defer util.Recover()
+
 		for _ = range time.Tick(time.Hour) {
 			hour, _ := time.ParseDuration("-30m")
 			threshold := time.Now().Add(hour)
 
 			for _, s := range WideSessions {
 				if s.Updated.Before(threshold) {
-					glog.V(3).Infof("Removes a invalid session [%s]", s.Id)
+					logger.Debugf("Removes a invalid session [%s], user [%s]", s.ID, s.Username)
 
-					WideSessions.Remove(s.Id)
+					WideSessions.Remove(s.ID)
 				}
 			}
 		}
 	}()
 }
 
+// Online user statistic report.
+type userReport struct {
+	username   string
+	sessionCnt int
+	processCnt int
+	updated    time.Time
+}
+
+// report returns a online user statistics in pretty format.
+func (u *userReport) report() string {
+	return "[" + u.username + "] has [" + strconv.Itoa(u.sessionCnt) + "] sessions and [" + strconv.Itoa(u.processCnt) +
+		"] running processes, latest activity [" + u.updated.Format("2006-01-02 15:04:05") + "]"
+}
+
+// FixedTimeReport reports the Wide sessions status periodically (10 minutes).
+func FixedTimeReport() {
+	go func() {
+		defer util.Recover()
+
+		for _ = range time.Tick(10 * time.Minute) {
+			users := userReports{}
+			processSum := 0
+
+			for _, s := range WideSessions {
+				processCnt := len(s.Processes)
+				processSum += processCnt
+
+				if report, exists := contains(users, s.Username); exists {
+					if s.Updated.After(report.updated) {
+						report.updated = s.Updated
+					}
+
+					report.sessionCnt++
+					report.processCnt += processCnt
+				} else {
+					users = append(users, &userReport{username: s.Username, sessionCnt: 1, processCnt: processCnt, updated: s.Updated})
+				}
+			}
+
+			var buf bytes.Buffer
+			buf.WriteString("\n  [" + strconv.Itoa(len(users)) + "] users, [" + strconv.Itoa(processSum) + "] running processes and [" +
+				strconv.Itoa(len(WideSessions)) + "] sessions currently\n")
+
+			sort.Sort(users)
+
+			for _, t := range users {
+				buf.WriteString("    " + t.report() + "\n")
+			}
+
+			logger.Info(buf.String())
+		}
+	}()
+}
+
+func contains(reports []*userReport, username string) (*userReport, bool) {
+	for _, ur := range reports {
+		if username == ur.username {
+			return ur, true
+		}
+	}
+
+	return nil, false
+}
+
+type userReports []*userReport
+
+func (f userReports) Len() int           { return len(f) }
+func (f userReports) Swap(i, j int)      { f[i], f[j] = f[j], f[i] }
+func (f userReports) Less(i, j int) bool { return f[i].processCnt > f[j].processCnt }
+
+const (
+	// Time allowed to write a message to the peer.
+	writeWait = 10 * time.Second
+
+	// Time allowed to read the next pong message from the peer.
+	pongWait = 60 * time.Second
+
+	// Send pings to peer with this period. Must be less than pongWait.
+	pingPeriod = (pongWait * 9) / 10
+)
+
 // WSHandler handles request of creating session channel.
 //
 // When a channel closed, releases all resources associated with it.
 func WSHandler(w http.ResponseWriter, r *http.Request) {
 	sid := r.URL.Query()["sid"][0]
+
+	conn, _ := websocket.Upgrade(w, r, nil, 1024, 1024)
+	wsChan := util.WSChannel{Sid: sid, Conn: conn, Request: r, Time: time.Now()}
+
+	ret := map[string]interface{}{"output": "Session initialized", "cmd": "init-session"}
+	err := wsChan.WriteJSON(&ret)
+	if nil != err {
+		return
+	}
+
+	SessionWS[sid] = &wsChan
+
 	wSession := WideSessions.Get(sid)
 	if nil == wSession {
 		httpSession, _ := HTTPSession.Get(r, "wide-session")
@@ -118,36 +228,50 @@ func WSHandler(w http.ResponseWriter, r *http.Request) {
 		httpSession.Options.MaxAge = conf.Wide.HTTPSessionMaxAge
 		httpSession.Save(r, w)
 
-		WideSessions.New(httpSession, sid)
+		wSession = WideSessions.new(httpSession, sid)
 
-		glog.Infof("Created a wide session [%s] for websocket reconnecting", sid)
+		logger.Tracef("Created a wide session [%s] for websocket reconnecting, user [%s]", sid, wSession.Username)
 	}
 
-	conn, _ := websocket.Upgrade(w, r, nil, 1024, 1024)
-	wsChan := util.WSChannel{Sid: sid, Conn: conn, Request: r, Time: time.Now()}
-
-	SessionWS[sid] = &wsChan
-
-	ret := map[string]interface{}{"output": "Session initialized", "cmd": "init-session"}
-	wsChan.Conn.WriteJSON(&ret)
-
-	glog.V(4).Infof("Open a new [Session Channel] with session [%s], %d", sid, len(SessionWS))
+	logger.Tracef("Open a new [Session Channel] with session [%s], %d", sid, len(SessionWS))
 
 	input := map[string]interface{}{}
 
-	for {
-		if err := wsChan.Conn.ReadJSON(&input); err != nil {
-			glog.V(3).Infof("[Session Channel] of session [%s] disconnected, releases all resources with it", sid)
+	wsChan.Conn.SetReadDeadline(time.Now().Add(pongWait))
+	wsChan.Conn.SetPongHandler(func(string) error { wsChan.Conn.SetReadDeadline(time.Now().Add(pongWait)); return nil })
+	ticker := time.NewTicker(pingPeriod)
 
-			WideSessions.Remove(sid)
+	defer func() {
+		WideSessions.Remove(sid)
+		ticker.Stop()
+		wsChan.Close()
+	}()
+
+	// send websocket ping message.
+	go func(t *time.Ticker, channel util.WSChannel) {
+		for {
+			select {
+			case <-t.C:
+				if err := channel.Conn.WriteMessage(websocket.PingMessage, []byte{}); err != nil {
+					return
+				}
+			}
+		}
+
+	}(ticker, wsChan)
+
+	for {
+		if err := wsChan.ReadJSON(&input); err != nil {
+			logger.Tracef("[Session Channel] of session [%s] disconnected, releases all resources with it, user [%s]", sid, wSession.Username)
 
 			return
 		}
 
 		ret = map[string]interface{}{"output": "", "cmd": "session-output"}
 
-		if err := wsChan.Conn.WriteJSON(&ret); err != nil {
-			glog.Error("Session WS ERROR: " + err.Error())
+		if err := wsChan.WriteJSON(&ret); err != nil {
+			logger.Error("Session WS ERROR: " + err.Error())
+
 			return
 		}
 
@@ -155,8 +279,8 @@ func WSHandler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// SaveContent handles request of session content storing.
-func SaveContent(w http.ResponseWriter, r *http.Request) {
+// SaveContentHandler handles request of session content string.
+func SaveContentHandler(w http.ResponseWriter, r *http.Request) {
 	data := map[string]interface{}{"succ": true}
 	defer util.RetJSON(w, r, data)
 
@@ -166,7 +290,7 @@ func SaveContent(w http.ResponseWriter, r *http.Request) {
 	}{}
 
 	if err := json.NewDecoder(r.Body).Decode(&args); err != nil {
-		glog.Error(err)
+		logger.Error(err)
 		data["succ"] = false
 
 		return
@@ -181,10 +305,12 @@ func SaveContent(w http.ResponseWriter, r *http.Request) {
 
 	wSession.Content = args.LatestSessionContent
 
-	for _, user := range conf.Wide.Users {
+	for _, user := range conf.Users {
 		if user.Name == wSession.Username {
-			// update the variable in-memory, conf.FixedTimeSave() function will persist it periodically
+			// update the variable in-memory, session.FixedTimeSave() function will persist it periodically
 			user.LatestSessionContent = wSession.Content
+
+			user.Lived = time.Now().UnixNano()
 
 			wSession.Refresh()
 
@@ -205,39 +331,20 @@ func (s *WideSession) Refresh() {
 	s.Updated = time.Now()
 }
 
-// New creates a wide session.
-func (sessions *Sessions) New(httpSession *sessions.Session, sid string) *WideSession {
-	mutex.Lock()
-	defer mutex.Unlock()
+// GenId generates a wide session id.
+func (sessions *wSessions) GenId() string {
+	rand.Seed(time.Now().UnixNano())
 
-	now := time.Now()
-
-	// create user event queuselect
-	userEventQueue := event.UserEventQueues.New(sid)
-
-	ret := &WideSession{
-		Id:          sid,
-		Username:    httpSession.Values["username"].(string),
-		HTTPSession: httpSession,
-		EventQueue:  userEventQueue,
-		State:       SessionStateActive,
-		Content:     &conf.LatestSessionContent{},
-		Created:     now,
-		Updated:     now,
-	}
-
-	*sessions = append(*sessions, ret)
-
-	return ret
+	return strconv.Itoa(rand.Int())
 }
 
 // Get gets a wide session with the specified session id.
-func (sessions *Sessions) Get(sid string) *WideSession {
+func (sessions *wSessions) Get(sid string) *WideSession {
 	mutex.Lock()
 	defer mutex.Unlock()
 
 	for _, s := range *sessions {
-		if s.Id == sid {
+		if s.ID == sid {
 			return s
 		}
 	}
@@ -252,12 +359,13 @@ func (sessions *Sessions) Get(sid string) *WideSession {
 //  1. user event queue
 //  2. process set
 //  3. websocket channels
-func (sessions *Sessions) Remove(sid string) {
+//  4. file watcher
+func (sessions *wSessions) Remove(sid string) {
 	mutex.Lock()
 	defer mutex.Unlock()
 
 	for i, s := range *sessions {
-		if s.Id == sid {
+		if s.ID == sid {
 			// remove from session set
 			*sessions = append((*sessions)[:i], (*sessions)[i+1:]...)
 
@@ -267,9 +375,9 @@ func (sessions *Sessions) Remove(sid string) {
 			// kill processes
 			for _, p := range s.Processes {
 				if err := p.Kill(); nil != err {
-					glog.Errorf("Can't kill process [%d] of session [%s]", p.Pid, sid)
+					logger.Errorf("Can't kill process [%d] of session [%s], user [%s]", p.Pid, sid, s.Username)
 				} else {
-					glog.V(3).Infof("Killed a process [%d] of session [%s]", p.Pid, sid)
+					logger.Debugf("Killed a process [%d] of session [%s], user [%s]", p.Pid, sid, s.Username)
 				}
 			}
 
@@ -289,16 +397,24 @@ func (sessions *Sessions) Remove(sid string) {
 				delete(SessionWS, sid)
 			}
 
-			glog.V(3).Infof("Removed a session [%s]", s.Id)
+			if ws, ok := PlaygroundWS[sid]; ok {
+				ws.Close()
+				delete(PlaygroundWS, sid)
+			}
+
+			// file watcher
+			if nil != s.FileWatcher {
+				s.FileWatcher.Close()
+			}
 
 			cnt := 0 // count wide sessions associated with HTTP session
-			for _, s := range *sessions {
-				if s.HTTPSession.ID == s.HTTPSession.ID {
+			for _, ses := range *sessions {
+				if ses.Username == s.Username {
 					cnt++
 				}
 			}
 
-			glog.V(3).Infof("User [%s] has [%d] sessions", s.Username, cnt)
+			logger.Debugf("Removed a session [%s] of user [%s], it has [%d] sessions currently", sid, s.Username, cnt)
 
 			return
 		}
@@ -306,7 +422,7 @@ func (sessions *Sessions) Remove(sid string) {
 }
 
 // GetByUsername gets wide sessions.
-func (sessions *Sessions) GetByUsername(username string) []*WideSession {
+func (sessions *wSessions) GetByUsername(username string) []*WideSession {
 	mutex.Lock()
 	defer mutex.Unlock()
 
@@ -317,6 +433,123 @@ func (sessions *Sessions) GetByUsername(username string) []*WideSession {
 			ret = append(ret, s)
 		}
 	}
+
+	return ret
+}
+
+// new creates a wide session.
+func (sessions *wSessions) new(httpSession *sessions.Session, sid string) *WideSession {
+	mutex.Lock()
+	defer mutex.Unlock()
+
+	username := httpSession.Values["username"].(string)
+	now := time.Now()
+
+	ret := &WideSession{
+		ID:          sid,
+		Username:    username,
+		HTTPSession: httpSession,
+		EventQueue:  nil,
+		State:       sessionStateActive,
+		Content:     &conf.LatestSessionContent{},
+		Created:     now,
+		Updated:     now,
+	}
+
+	*sessions = append(*sessions, ret)
+
+	if "playground" == username {
+		return ret
+	}
+
+	// create user event queue
+	ret.EventQueue = event.UserEventQueues.New(sid)
+
+	// add a filesystem watcher to notify front-end after the files changed
+	watcher, err := fsnotify.NewWatcher()
+	if err != nil {
+		logger.Error(err)
+
+		return ret
+	}
+
+	go func() {
+		defer util.Recover()
+
+		for {
+			ch := SessionWS[sid]
+			if nil == ch {
+				return // release this gorutine
+			}
+
+			select {
+			case event := <-watcher.Events:
+				path := filepath.ToSlash(event.Name)
+				dir := filepath.ToSlash(filepath.Dir(path))
+
+				ch = SessionWS[sid]
+				if nil == ch {
+					return // release this gorutine
+				}
+
+				logger.Trace(event)
+
+				if event.Op&fsnotify.Create == fsnotify.Create {
+					fileType := "f"
+
+					if util.File.IsDir(path) {
+						fileType = "d"
+
+						if err = watcher.Add(path); nil != err {
+							logger.Warn(err, path)
+						}
+					}
+
+					cmd := map[string]interface{}{"path": path, "dir": dir,
+						"cmd": "create-file", "type": fileType}
+					ch.WriteJSON(&cmd)
+				} else if event.Op&fsnotify.Remove == fsnotify.Remove {
+					cmd := map[string]interface{}{"path": path, "dir": dir,
+						"cmd": "remove-file", "type": ""}
+					ch.WriteJSON(&cmd)
+
+				} else if event.Op&fsnotify.Rename == fsnotify.Rename {
+					cmd := map[string]interface{}{"path": path, "dir": dir,
+						"cmd": "rename-file", "type": ""}
+					ch.WriteJSON(&cmd)
+				}
+			case err := <-watcher.Errors:
+				if nil != err {
+					logger.Error("File watcher ERROR: ", err)
+				}
+			}
+		}
+	}()
+
+	go func() {
+		defer util.Recover()
+
+		workspaces := filepath.SplitList(conf.GetUserWorkspace(username))
+		for _, workspace := range workspaces {
+			filepath.Walk(filepath.Join(workspace, "src"), func(dirPath string, f os.FileInfo, err error) error {
+				if ".git" == f.Name() { // XXX: discard other unconcered dirs
+					return filepath.SkipDir
+				}
+
+				if f.IsDir() {
+					if err = watcher.Add(dirPath); nil != err {
+						logger.Error(err, dirPath)
+					}
+
+					logger.Tracef("File watcher added a dir [%s]", dirPath)
+				}
+
+				return nil
+			})
+		}
+
+		ret.FileWatcher = watcher
+	}()
 
 	return ret
 }

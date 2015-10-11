@@ -1,4 +1,4 @@
-// Copyright (c) 2014, B3log
+// Copyright (c) 2014-2015, b3log.org
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// File tree manipulations.
+// Package file includes file related manipulations.
 package file
 
 import (
@@ -21,30 +21,35 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"runtime"
 	"sort"
 	"strings"
 
 	"github.com/b3log/wide/conf"
 	"github.com/b3log/wide/event"
+	"github.com/b3log/wide/log"
 	"github.com/b3log/wide/session"
 	"github.com/b3log/wide/util"
-	"github.com/golang/glog"
 )
 
-// File node, used to construct the file tree.
-type FileNode struct {
-	Name      string      `json:"name"`
-	Path      string      `json:"path"`
-	IconSkin  string      `json:"iconSkin"`  // Value should be end with a space
-	Type      string      `json:"type"`      // "f": file, "d": directory
-	Creatable bool        `json:"creatable"` // whether can create file in this file node
-	Removable bool        `json:"removable"` // whether can remove this file node
-	Mode      string      `json:"mode"`
-	FileNodes []*FileNode `json:"children"`
+// Logger.
+var logger = log.NewLogger(os.Stdout)
+
+// Node represents a file node in file tree.
+type Node struct {
+	Id        string  `json:"id"`
+	Name      string  `json:"name"`
+	Path      string  `json:"path"`
+	IconSkin  string  `json:"iconSkin"` // Value should be end with a space
+	IsParent  bool    `json:"isParent"`
+	Type      string  `json:"type"`      // "f": file, "d": directory
+	Creatable bool    `json:"creatable"` // whether can create file in this file node
+	Removable bool    `json:"removable"` // whether can remove this file node
+	IsGoAPI   bool    `json:"isGOAPI"`
+	Mode      string  `json:"mode"`
+	Children  []*Node `json:"children"`
 }
 
-// Source code snippet, used to as the result of "Find Usages", "Search".
+// Snippet represents a source code snippet, used to as the result of "Find Usages", "Search".
 type Snippet struct {
 	Path     string   `json:"path"`     // file path
 	Line     int      `json:"line"`     // line number
@@ -52,36 +57,38 @@ type Snippet struct {
 	Contents []string `json:"contents"` // lines nearby
 }
 
-var apiNode *FileNode
+var apiNode *Node
 
 // initAPINode builds the Go API file node.
 func initAPINode() {
-	apiPath := runtime.GOROOT() + conf.PathSeparator + "src" + conf.PathSeparator + "pkg" // before Go 1.4
-	if !util.File.IsExist(apiPath) {
-		apiPath = runtime.GOROOT() + conf.PathSeparator + "src" // Go 1.4 and after
-	}
+	apiPath := util.Go.GetAPIPath()
 
-	apiNode = &FileNode{Name: "Go API", Path: apiPath, IconSkin: "ico-ztree-dir-api ", Type: "d",
-		Creatable: false, Removable: false, FileNodes: []*FileNode{}}
+	apiNode = &Node{Name: "Go API", Path: apiPath, IconSkin: "ico-ztree-dir-api ", Type: "d",
+		Creatable: false, Removable: false, IsGoAPI: true, Children: []*Node{}}
 
-	walk(apiPath, apiNode, false, false)
+	walk(apiPath, apiNode, false, false, true)
 }
 
-// GetFiles handles request of constructing user workspace file tree.
+// GetFilesHandler handles request of constructing user workspace file tree.
 //
 // The Go API source code package also as a child node,
-// so that users can easily view the Go API source code in filre tree.
-func GetFiles(w http.ResponseWriter, r *http.Request) {
+// so that users can easily view the Go API source code in file tree.
+func GetFilesHandler(w http.ResponseWriter, r *http.Request) {
+	httpSession, _ := session.HTTPSession.Get(r, "wide-session")
+	if httpSession.IsNew {
+		http.Error(w, "Forbidden", http.StatusForbidden)
+
+		return
+	}
+	username := httpSession.Values["username"].(string)
+
 	data := map[string]interface{}{"succ": true}
-	defer util.RetJSON(w, r, data)
+	defer util.RetGzJSON(w, r, data)
 
-	session, _ := session.HTTPSession.Get(r, "wide-session")
-
-	username := session.Values["username"].(string)
-	userWorkspace := conf.Wide.GetUserWorkspace(username)
+	userWorkspace := conf.GetUserWorkspace(username)
 	workspaces := filepath.SplitList(userWorkspace)
 
-	root := FileNode{Name: "root", Path: "", IconSkin: "ico-ztree-dir ", Type: "d", FileNodes: []*FileNode{}}
+	root := Node{Name: "root", Path: "", IconSkin: "ico-ztree-dir ", Type: "d", IsParent: true, Children: []*Node{}}
 
 	if nil == apiNode { // lazy init
 		initAPINode()
@@ -91,37 +98,100 @@ func GetFiles(w http.ResponseWriter, r *http.Request) {
 	for _, workspace := range workspaces {
 		workspacePath := workspace + conf.PathSeparator + "src"
 
-		workspaceNode := FileNode{Name: workspace[strings.LastIndex(workspace, conf.PathSeparator)+1:],
-			Path: workspacePath, IconSkin: "ico-ztree-dir-workspace ", Type: "d",
-			Creatable: true, Removable: false, FileNodes: []*FileNode{}}
+		workspaceNode := Node{
+			Id:        filepath.ToSlash(workspacePath), // jQuery API can't accept "\", so we convert it to "/"
+			Name:      workspace[strings.LastIndex(workspace, conf.PathSeparator)+1:],
+			Path:      filepath.ToSlash(workspacePath),
+			IconSkin:  "ico-ztree-dir-workspace ",
+			Type:      "d",
+			Creatable: true,
+			Removable: false,
+			IsGoAPI:   false,
+			Children:  []*Node{}}
 
-		walk(workspacePath, &workspaceNode, true, true)
+		walk(workspacePath, &workspaceNode, true, true, false)
 
 		// add workspace node
-		root.FileNodes = append(root.FileNodes, &workspaceNode)
+		root.Children = append(root.Children, &workspaceNode)
 	}
 
 	// add Go API node
-	root.FileNodes = append(root.FileNodes, apiNode)
+	root.Children = append(root.Children, apiNode)
 
 	data["root"] = root
 }
 
-// GetFile handles request of opening file by editor.
-func GetFile(w http.ResponseWriter, r *http.Request) {
+// RefreshDirectoryHandler handles request of refresh a directory of file tree.
+func RefreshDirectoryHandler(w http.ResponseWriter, r *http.Request) {
+	httpSession, _ := session.HTTPSession.Get(r, "wide-session")
+	if httpSession.IsNew {
+		http.Error(w, "Forbidden", http.StatusForbidden)
+
+		return
+	}
+	username := httpSession.Values["username"].(string)
+
+	r.ParseForm()
+	path := r.FormValue("path")
+
+	if !util.Go.IsAPI(path) && !session.CanAccess(username, path) {
+		http.Error(w, "Forbidden", http.StatusForbidden)
+
+		return
+	}
+
+	node := Node{Name: "root", Path: path, IconSkin: "ico-ztree-dir ", Type: "d", Children: []*Node{}}
+
+	walk(path, &node, true, true, false)
+
+	w.Header().Set("Content-Type", "application/json")
+	data, err := json.Marshal(node.Children)
+	if err != nil {
+		logger.Error(err)
+		return
+	}
+
+	w.Write(data)
+}
+
+// GetFileHandler handles request of opening file by editor.
+func GetFileHandler(w http.ResponseWriter, r *http.Request) {
+	httpSession, _ := session.HTTPSession.Get(r, "wide-session")
+	if httpSession.IsNew {
+		http.Error(w, "Forbidden", http.StatusForbidden)
+
+		return
+	}
+	username := httpSession.Values["username"].(string)
+
 	data := map[string]interface{}{"succ": true}
 	defer util.RetJSON(w, r, data)
 
 	var args map[string]interface{}
 
 	if err := json.NewDecoder(r.Body).Decode(&args); err != nil {
-		glog.Error(err)
+		logger.Error(err)
 		data["succ"] = false
 
 		return
 	}
 
 	path := args["path"].(string)
+
+	if !util.Go.IsAPI(path) && !session.CanAccess(username, path) {
+		http.Error(w, "Forbidden", http.StatusForbidden)
+
+		return
+	}
+
+	size := util.File.GetFileSize(path)
+	if size > 5242880 { // 5M
+		data["succ"] = false
+		data["msg"] = "This file is too large to open :("
+
+		return
+	}
+
 	buf, _ := ioutil.ReadFile(path)
 
 	extension := filepath.Ext(path)
@@ -131,13 +201,15 @@ func GetFile(w http.ResponseWriter, r *http.Request) {
 
 		data["mode"] = "img"
 
-		user := GetUsre(path)
-		if nil == user {
-			glog.Warningf("The path [%s] has no owner")
+		username := conf.GetOwner(path)
+		if "" == username {
+			logger.Warnf("The path [%s] has no owner")
 			data["path"] = ""
 
 			return
 		}
+
+		user := conf.GetUser(username)
 
 		data["path"] = "/workspace/" + user.Name + "/" + strings.Replace(path, user.GetWorkspace(), "", 1)
 
@@ -151,20 +223,27 @@ func GetFile(w http.ResponseWriter, r *http.Request) {
 		data["msg"] = "Can't open a binary file :("
 	} else {
 		data["content"] = content
-		data["mode"] = getEditorMode(extension)
 		data["path"] = path
 	}
 }
 
-// SaveFile handles request of saving file.
-func SaveFile(w http.ResponseWriter, r *http.Request) {
+// SaveFileHandler handles request of saving file.
+func SaveFileHandler(w http.ResponseWriter, r *http.Request) {
+	httpSession, _ := session.HTTPSession.Get(r, "wide-session")
+	if httpSession.IsNew {
+		http.Error(w, "Forbidden", http.StatusForbidden)
+
+		return
+	}
+	username := httpSession.Values["username"].(string)
+
 	data := map[string]interface{}{"succ": true}
 	defer util.RetJSON(w, r, data)
 
 	var args map[string]interface{}
 
 	if err := json.NewDecoder(r.Body).Decode(&args); err != nil {
-		glog.Error(err)
+		logger.Error(err)
 		data["succ"] = false
 
 		return
@@ -173,10 +252,16 @@ func SaveFile(w http.ResponseWriter, r *http.Request) {
 	filePath := args["file"].(string)
 	sid := args["sid"].(string)
 
+	if util.Go.IsAPI(filePath) || !session.CanAccess(username, filePath) {
+		http.Error(w, "Forbidden", http.StatusForbidden)
+
+		return
+	}
+
 	fout, err := os.Create(filePath)
 
 	if nil != err {
-		glog.Error(err)
+		logger.Error(err)
 		data["succ"] = false
 
 		return
@@ -187,7 +272,7 @@ func SaveFile(w http.ResponseWriter, r *http.Request) {
 	fout.WriteString(code)
 
 	if err := fout.Close(); nil != err {
-		glog.Error(err)
+		logger.Error(err)
 		data["succ"] = false
 
 		wSession := session.WideSessions.Get(sid)
@@ -198,21 +283,36 @@ func SaveFile(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// NewFile handles request of creating file or directory.
-func NewFile(w http.ResponseWriter, r *http.Request) {
+// NewFileHandler handles request of creating file or directory.
+func NewFileHandler(w http.ResponseWriter, r *http.Request) {
+	httpSession, _ := session.HTTPSession.Get(r, "wide-session")
+	if httpSession.IsNew {
+		http.Error(w, "Forbidden", http.StatusForbidden)
+
+		return
+	}
+	username := httpSession.Values["username"].(string)
+
 	data := map[string]interface{}{"succ": true}
 	defer util.RetJSON(w, r, data)
 
 	var args map[string]interface{}
 
 	if err := json.NewDecoder(r.Body).Decode(&args); err != nil {
-		glog.Error(err)
+		logger.Error(err)
 		data["succ"] = false
 
 		return
 	}
 
 	path := args["path"].(string)
+
+	if util.Go.IsAPI(path) || !session.CanAccess(username, path) {
+		http.Error(w, "Forbidden", http.StatusForbidden)
+
+		return
+	}
+
 	fileType := args["fileType"].(string)
 	sid := args["sid"].(string)
 
@@ -228,26 +328,43 @@ func NewFile(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if "f" == fileType {
-		extension := filepath.Ext(path)
-		data["mode"] = getEditorMode(extension)
+		logger.Debugf("Created a file [%s] by user [%s]", path, wSession.Username)
+	} else {
+		logger.Debugf("Created a dir [%s] by user [%s]", path, wSession.Username)
 	}
+
 }
 
-// RemoveFile handles request of removing file or directory.
-func RemoveFile(w http.ResponseWriter, r *http.Request) {
+// RemoveFileHandler handles request of removing file or directory.
+func RemoveFileHandler(w http.ResponseWriter, r *http.Request) {
+	httpSession, _ := session.HTTPSession.Get(r, "wide-session")
+	if httpSession.IsNew {
+		http.Error(w, "Forbidden", http.StatusForbidden)
+
+		return
+	}
+	username := httpSession.Values["username"].(string)
+
 	data := map[string]interface{}{"succ": true}
 	defer util.RetJSON(w, r, data)
 
 	var args map[string]interface{}
 
 	if err := json.NewDecoder(r.Body).Decode(&args); err != nil {
-		glog.Error(err)
+		logger.Error(err)
 		data["succ"] = false
 
 		return
 	}
 
 	path := args["path"].(string)
+
+	if util.Go.IsAPI(path) || !session.CanAccess(username, path) {
+		http.Error(w, "Forbidden", http.StatusForbidden)
+
+		return
+	}
+
 	sid := args["sid"].(string)
 
 	wSession := session.WideSessions.Get(sid)
@@ -257,25 +374,50 @@ func RemoveFile(w http.ResponseWriter, r *http.Request) {
 
 		wSession.EventQueue.Queue <- &event.Event{Code: event.EvtCodeServerInternalError, Sid: sid,
 			Data: "can't remove file " + path}
+
+		return
 	}
+
+	logger.Debugf("Removed a file [%s] by user [%s]", path, wSession.Username)
 }
 
-// RenameFile handles request of renaming file or directory.
-func RenameFile(w http.ResponseWriter, r *http.Request) {
+// RenameFileHandler handles request of renaming file or directory.
+func RenameFileHandler(w http.ResponseWriter, r *http.Request) {
+	httpSession, _ := session.HTTPSession.Get(r, "wide-session")
+	if httpSession.IsNew {
+		http.Error(w, "Forbidden", http.StatusForbidden)
+
+		return
+	}
+	username := httpSession.Values["username"].(string)
+
 	data := map[string]interface{}{"succ": true}
 	defer util.RetJSON(w, r, data)
 
 	var args map[string]interface{}
 
 	if err := json.NewDecoder(r.Body).Decode(&args); err != nil {
-		glog.Error(err)
+		logger.Error(err)
 		data["succ"] = false
 
 		return
 	}
 
 	oldPath := args["oldPath"].(string)
+	if util.Go.IsAPI(oldPath) ||
+		!session.CanAccess(username, oldPath) {
+		http.Error(w, "Forbidden", http.StatusForbidden)
+
+		return
+	}
+
 	newPath := args["newPath"].(string)
+	if util.Go.IsAPI(newPath) || !session.CanAccess(username, newPath) {
+		http.Error(w, "Forbidden", http.StatusForbidden)
+
+		return
+	}
+
 	sid := args["sid"].(string)
 
 	wSession := session.WideSessions.Get(sid)
@@ -285,7 +427,11 @@ func RenameFile(w http.ResponseWriter, r *http.Request) {
 
 		wSession.EventQueue.Queue <- &event.Event{Code: event.EvtCodeServerInternalError, Sid: sid,
 			Data: "can't rename file " + oldPath}
+
+		return
 	}
+
+	logger.Debugf("Renamed a file [%s] to [%s] by user [%s]", oldPath, newPath, wSession.Username)
 }
 
 // Use to find results sorting.
@@ -300,25 +446,37 @@ func (f foundPaths) Len() int           { return len(f) }
 func (f foundPaths) Swap(i, j int)      { f[i], f[j] = f[j], f[i] }
 func (f foundPaths) Less(i, j int) bool { return f[i].score > f[j].score }
 
-// Find handles request of find files under the specified directory with the specified filename pattern.
-func Find(w http.ResponseWriter, r *http.Request) {
+// FindHandler handles request of find files under the specified directory with the specified filename pattern.
+func FindHandler(w http.ResponseWriter, r *http.Request) {
+	httpSession, _ := session.HTTPSession.Get(r, "wide-session")
+	if httpSession.IsNew {
+		http.Error(w, "Forbidden", http.StatusForbidden)
+
+		return
+	}
+	username := httpSession.Values["username"].(string)
+
 	data := map[string]interface{}{"succ": true}
 	defer util.RetJSON(w, r, data)
 
 	var args map[string]interface{}
 	if err := json.NewDecoder(r.Body).Decode(&args); err != nil {
-		glog.Error(err)
+		logger.Error(err)
 		data["succ"] = false
 
 		return
 	}
 
 	path := args["path"].(string) // path of selected file in file tree
+	if !util.Go.IsAPI(path) && !session.CanAccess(username, path) {
+		http.Error(w, "Forbidden", http.StatusForbidden)
+
+		return
+	}
+
 	name := args["name"].(string)
 
-	session, _ := session.HTTPSession.Get(r, "wide-session")
-	username := session.Values["username"].(string)
-	userWorkspace := conf.Wide.GetUserWorkspace(username)
+	userWorkspace := conf.GetUserWorkspace(username)
 	workspaces := filepath.SplitList(userWorkspace)
 
 	if "" != path && !util.File.IsDir(path) {
@@ -333,7 +491,7 @@ func Find(w http.ResponseWriter, r *http.Request) {
 		for _, r := range rs {
 			substr := util.Str.LCS(path, *r)
 
-			founds = append(founds, &foundPath{Path: *r, score: len(substr)})
+			founds = append(founds, &foundPath{Path: filepath.ToSlash(*r), score: len(substr)})
 		}
 	}
 
@@ -342,31 +500,59 @@ func Find(w http.ResponseWriter, r *http.Request) {
 	data["founds"] = founds
 }
 
-// SearchText handles request of searching files under the specified directory with the specified keyword.
-func SearchText(w http.ResponseWriter, r *http.Request) {
+// SearchTextHandler handles request of searching files under the specified directory with the specified keyword.
+func SearchTextHandler(w http.ResponseWriter, r *http.Request) {
+	httpSession, _ := session.HTTPSession.Get(r, "wide-session")
+	if httpSession.IsNew {
+		http.Error(w, "Forbidden", http.StatusForbidden)
+
+		return
+	}
+
 	data := map[string]interface{}{"succ": true}
 	defer util.RetJSON(w, r, data)
 
 	var args map[string]interface{}
 
 	if err := json.NewDecoder(r.Body).Decode(&args); err != nil {
-		glog.Error(err)
+		logger.Error(err)
 		data["succ"] = false
 
 		return
 	}
 
+	sid := args["sid"].(string)
+	wSession := session.WideSessions.Get(sid)
+	if nil == wSession {
+		data["succ"] = false
+
+		return
+	}
+
+	// XXX: just one directory
+
 	dir := args["dir"].(string)
+	if "" == dir {
+		userWorkspace := conf.GetUserWorkspace(wSession.Username)
+		workspaces := filepath.SplitList(userWorkspace)
+		dir = workspaces[0]
+	}
+
 	extension := args["extension"].(string)
 	text := args["text"].(string)
 
-	founds := search(dir, extension, text, []*Snippet{})
+	founds := []*Snippet{}
+	if util.File.IsDir(dir) {
+		founds = search(dir, extension, text, []*Snippet{})
+	} else {
+		founds = searchInFile(dir, text)
+	}
 
 	data["founds"] = founds
 }
 
 // walk traverses the specified path to build a file tree.
-func walk(path string, node *FileNode, creatable, removable bool) {
+func walk(path string, node *Node, creatable, removable, isGOAPI bool) {
 	files := listFiles(path)
 
 	for _, filename := range files {
@@ -374,11 +560,17 @@ func walk(path string, node *FileNode, creatable, removable bool) {
 
 		fio, _ := os.Lstat(fpath)
 
-		child := FileNode{Name: filename, Path: fpath, Removable: removable, FileNodes: []*FileNode{}}
-		node.FileNodes = append(node.FileNodes, &child)
+		child := Node{
+			Id:        filepath.ToSlash(fpath), // jQuery API can't accept "\", so we convert it to "/"
+			Name:      filename,
+			Path:      filepath.ToSlash(fpath),
+			Removable: removable,
+			IsGoAPI:   isGOAPI,
+			Children:  []*Node{}}
+		node.Children = append(node.Children, &child)
 
 		if nil == fio {
-			glog.Warningf("Path [%s] is nil", fpath)
+			logger.Warnf("Path [%s] is nil", fpath)
 
 			continue
 		}
@@ -387,15 +579,15 @@ func walk(path string, node *FileNode, creatable, removable bool) {
 			child.Type = "d"
 			child.Creatable = creatable
 			child.IconSkin = "ico-ztree-dir "
+			child.IsParent = true
 
-			walk(fpath, &child, creatable, removable)
+			walk(fpath, &child, creatable, removable, isGOAPI)
 		} else {
 			child.Type = "f"
 			child.Creatable = creatable
 			ext := filepath.Ext(fpath)
 
 			child.IconSkin = getIconSkin(ext)
-			child.Mode = getEditorMode(ext)
 		}
 	}
 
@@ -420,7 +612,7 @@ func listFiles(dirname string) []string {
 		fio, err := os.Lstat(path)
 
 		if nil != err {
-			glog.Warningf("Can't read file info [%s]", path)
+			logger.Warnf("Can't read file info [%s]", path)
 
 			continue
 		}
@@ -433,6 +625,11 @@ func listFiles(dirname string) []string {
 
 			dirs = append(dirs, name)
 		} else {
+			// exclude the .DS_Store directory on Mac OS X
+			if ".DS_Store" == fio.Name() {
+				continue
+			}
+
 			files = append(files, name)
 		}
 	}
@@ -472,34 +669,6 @@ func getIconSkin(filenameExtension string) string {
 	}
 }
 
-// getEditorMode gets editor mode with the specified filename extension.
-//
-// Refers to the CodeMirror document for modes.
-func getEditorMode(filenameExtension string) string {
-	switch filenameExtension {
-	case ".go":
-		return "text/x-go"
-	case ".html":
-		return "text/html"
-	case ".md":
-		return "text/x-markdown"
-	case ".js":
-		return "text/javascript"
-	case ".json":
-		return "application/json"
-	case ".css":
-		return "text/css"
-	case ".xml":
-		return "application/xml"
-	case ".sh":
-		return "text/x-sh"
-	case ".sql":
-		return "text/x-sql"
-	default:
-		return "text/plain"
-	}
-}
-
 // createFile creates file on the specified path.
 //
 // fileType:
@@ -511,30 +680,30 @@ func createFile(path, fileType string) bool {
 	case "f":
 		file, err := os.OpenFile(path, os.O_CREATE, 0775)
 		if nil != err {
-			glog.Error(err)
+			logger.Error(err)
 
 			return false
 		}
 
 		defer file.Close()
 
-		glog.V(5).Infof("Created file [%s]", path)
+		logger.Tracef("Created file [%s]", path)
 
 		return true
 	case "d":
 		err := os.Mkdir(path, 0775)
 
 		if nil != err {
-			glog.Error(err)
+			logger.Error(err)
 
 			return false
 		}
 
-		glog.V(5).Infof("Created directory [%s]", path)
+		logger.Tracef("Created directory [%s]", path)
 
 		return true
 	default:
-		glog.Errorf("Unsupported file type [%s]", fileType)
+		logger.Errorf("Unsupported file type [%s]", fileType)
 
 		return false
 	}
@@ -543,12 +712,12 @@ func createFile(path, fileType string) bool {
 // removeFile removes file on the specified path.
 func removeFile(path string) bool {
 	if err := os.RemoveAll(path); nil != err {
-		glog.Errorf("Removes [%s] failed: [%s]", path, err.Error())
+		logger.Errorf("Removes [%s] failed: [%s]", path, err.Error())
 
 		return false
 	}
 
-	glog.Infof("Removed [%s]", path)
+	logger.Tracef("Removed [%s]", path)
 
 	return true
 }
@@ -556,12 +725,12 @@ func removeFile(path string) bool {
 // renameFile renames (moves) a file from the specified old path to the specified new path.
 func renameFile(oldPath, newPath string) bool {
 	if err := os.Rename(oldPath, newPath); nil != err {
-		glog.Errorf("Renames [%s] failed: [%s]", oldPath, err.Error())
+		logger.Errorf("Renames [%s] failed: [%s]", oldPath, err.Error())
 
 		return false
 	}
 
-	glog.Infof("Renamed [%s] to [%s]", oldPath, newPath)
+	logger.Tracef("Renamed [%s] to [%s]", oldPath, newPath)
 
 	return true
 }
@@ -581,7 +750,7 @@ func find(dir, name string, results []*string) []*string {
 	f.Close()
 
 	if nil != err {
-		glog.Errorf("Read dir [%s] failed: [%s]", dir, err.Error())
+		logger.Errorf("Read dir [%s] failed: [%s]", dir, err.Error())
 
 		return results
 	}
@@ -600,10 +769,11 @@ func find(dir, name string, results []*string) []*string {
 		} else {
 			// match filename
 			pattern := filepath.Dir(path) + conf.PathSeparator + name
-			match, err := filepath.Match(pattern, path)
+
+			match, err := filepath.Match(strings.ToLower(pattern), strings.ToLower(path))
 
 			if nil != err {
-				glog.Errorf("Find match filename failed: [%s]", err.Error)
+				logger.Errorf("Find match filename failed: [%s]", err.Error())
 
 				continue
 			}
@@ -629,7 +799,7 @@ func search(dir, extension, text string, snippets []*Snippet) []*Snippet {
 	f.Close()
 
 	if nil != err {
-		glog.Errorf("Read dir [%s] failed: [%s]", dir, err.Error())
+		logger.Errorf("Read dir [%s] failed: [%s]", dir, err.Error())
 
 		return snippets
 	}
@@ -657,7 +827,7 @@ func searchInFile(path string, text string) []*Snippet {
 
 	bytes, err := ioutil.ReadFile(path)
 	if nil != err {
-		glog.Errorf("Read file [%s] failed: [%s]", path, err.Error())
+		logger.Errorf("Read file [%s] failed: [%s]", path, err.Error())
 
 		return ret
 	}
@@ -670,25 +840,15 @@ func searchInFile(path string, text string) []*Snippet {
 	lines := strings.Split(content, "\n")
 
 	for idx, line := range lines {
-		ch := strings.Index(line, text)
+		ch := strings.Index(strings.ToLower(line), strings.ToLower(text))
 
 		if -1 != ch {
-			snippet := &Snippet{Path: path, Line: idx + 1, Ch: ch + 1, Contents: []string{line}}
+			snippet := &Snippet{Path: filepath.ToSlash(path),
+				Line: idx + 1, Ch: ch + 1, Contents: []string{line}}
 
 			ret = append(ret, snippet)
 		}
 	}
 
 	return ret
-}
-
-// GetUsre gets the user the specified path belongs to. Returns nil if not found.
-func GetUsre(path string) *conf.User {
-	for _, user := range conf.Wide.Users {
-		if strings.HasPrefix(path, user.GetWorkspace()) {
-			return user
-		}
-	}
-
-	return nil
 }

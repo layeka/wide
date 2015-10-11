@@ -1,4 +1,4 @@
-// Copyright (c) 2014, B3log
+// Copyright (c) 2014-2015, b3log.org
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -15,18 +15,49 @@
 package util
 
 import (
+	"errors"
 	"net/http"
 	"time"
 
 	"github.com/gorilla/websocket"
 )
 
-// WebSocket channel.
+// WSChannel represents a WebSocket channel.
 type WSChannel struct {
 	Sid     string          // wide session id
 	Conn    *websocket.Conn // websocket connection
 	Request *http.Request   // HTTP request related
 	Time    time.Time       // the latest use time
+}
+
+// WriteJSON writes the JSON encoding of v to the channel.
+func (c *WSChannel) WriteJSON(v interface{}) (ret error) {
+	if nil == c.Conn {
+		return errors.New("connection is nil, channel has been closed")
+	}
+
+	defer func() {
+		if r := recover(); nil != r {
+			ret = errors.New("channel has been closed")
+		}
+	}()
+
+	return c.Conn.WriteJSON(v)
+}
+
+// ReadJSON reads the next JSON-encoded message from the channel and stores it in the value pointed to by v.
+func (c *WSChannel) ReadJSON(v interface{}) (ret error) {
+	if nil == c.Conn {
+		return errors.New("connection is nil, channel has been closed")
+	}
+
+	defer func() {
+		if r := recover(); nil != r {
+			ret = errors.New("channel has been closed")
+		}
+	}()
+
+	return c.Conn.ReadJSON(v)
 }
 
 // Close closed the channel.
